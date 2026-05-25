@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
-# BootTerminal v1.0 - Bootable USB Drive Tester
+# Boot-Check v1.1 - Bootable USB Drive Tester
 # Author: Filipe Nunes <https://github.com/NunesFilipe>
-# Source: https://github.com/NunesFilipe/BootTerminal
+# Source: https://github.com/NunesFilipe/Boot-Check
 # License: MIT — free to use, modify and distribute with attribution.
 
-RESET="\033[0m"
-BOLD="\033[1m"
-DIM="\033[2m"
-RED="\033[1;31m"
-GREEN="\033[1;32m"
-YELLOW="\033[1;33m"
-BLUE="\033[1;34m"
-CYAN="\033[1;36m"
-WHITE="\033[1;37m"
+set -euo pipefail
 
+# ── ANSI COLOR CODES ──────────────────────────────────────────────────────────
+readonly RESET="\033[0m"
+readonly BOLD="\033[1m"
+readonly DIM="\033[2m"
+readonly RED="\033[1;31m"
+readonly GREEN="\033[1;32m"
+readonly YELLOW="\033[1;33m"
+readonly BLUE="\033[1;34m"
+readonly CYAN="\033[1;36m"
+readonly WHITE="\033[1;37m"
+
+# ── CONFIGURATION (edit these if needed) ─────────────────────────────────────
+# Path to OVMF firmware for UEFI mode.
+# Arch:          /usr/share/edk2/x64/OVMF.4m.fd
+# Debian/Ubuntu: /usr/share/OVMF/OVMF_CODE.fd
+# Fedora:        /usr/share/edk2/ovmf/OVMF_CODE.fd
 OVMF_PATH="/usr/share/edk2/x64/OVMF.4m.fd"
-QEMU_BIN="qemu-system-x86_64"
-RAM_MB=1024
-VERSION="1.0"
 
-readonly ALLOWED_DEV_PREFIX="/dev/"
+readonly QEMU_BIN="qemu-system-x86_64"
+readonly RAM_MB=1024
+readonly VERSION="1.1"
 readonly ALLOWED_SYS_PREFIX="/sys/block/"
+
+# ── TERMINAL HELPERS ──────────────────────────────────────────────────────────
 
 clear_screen() {
     clear
@@ -34,27 +43,14 @@ restore_cursor() {
 
 trap restore_cursor EXIT
 
-draw_line() {
-    local char="$1"
-    local width="${2:-60}"
-    printf '%0.s'"$char" $(seq 1 "$width")
-    echo
-}
-
-center_text() {
-    local text="$1"
-    local width="${2:-60}"
-    local textlen=${#text}
-    local pad=$(( (width - textlen) / 2 ))
-    printf "%${pad}s%s%${pad}s\n" "" "$text" ""
-}
+# ── TUI DRAWING ───────────────────────────────────────────────────────────────
 
 draw_header() {
     echo
     echo -e "${CYAN}${BOLD}"
     echo "  ╔══════════════════════════════════════════════════════════╗"
     echo "  ║                                                          ║"
-    echo "  ║          🖥   B O O T   T E R M I N A L                 ║"
+    echo "  ║             🖥   B O O T - C H E C K                    ║"
     echo "  ║            Testador de Pendrive Bootável                 ║"
     echo "  ║                    v${VERSION}                                 ║"
     echo "  ║                                                          ║"
@@ -79,33 +75,47 @@ draw_footer() {
     echo -e "${RESET}"
 }
 
+# ── LOG HELPERS ───────────────────────────────────────────────────────────────
+
 msg_info()    { echo -e "  ${CYAN}[•]${RESET} $*"; }
 msg_ok()      { echo -e "  ${GREEN}[✔]${RESET} $*"; }
 msg_warn()    { echo -e "  ${YELLOW}[!]${RESET} $*"; }
 msg_error()   { echo -e "  ${RED}[✘]${RESET} $*"; }
 
+# ── USB DETECTION ─────────────────────────────────────────────────────────────
+
+# Global session state — shared between menu functions
 USB_DEVICES=()
 USB_SIZES=()
 USB_LABELS=()
 
+# Parses lsblk output and populates USB_DEVICES / USB_SIZES / USB_LABELS
 detect_usb_drives() {
     USB_DEVICES=()
     USB_SIZES=()
     USB_LABELS=()
 
     while IFS= read -r line; do
-        local name size tran
-        name=$(echo "$line" | grep -oP 'NAME="\K[^"]+')
-        size=$(echo "$line" | grep -oP 'SIZE="\K[^"]+')
-        tran=$(echo "$line" | grep -oP 'TRAN="\K[^"]+')
+        local raw_name raw_size raw_tran
 
-        if [[ "$tran" == "usb" ]] && \
-           { [[ "$name" =~ ^sd[a-z]$ ]] || [[ "$name" =~ ^nvme[0-9]+n[0-9]+$ ]]; }; then
-            USB_DEVICES+=("/dev/$name")
-            USB_SIZES+=("$size")
+        # Extract fields using BASH_REMATCH to avoid subprocesses
+        [[ "$line" =~ NAME=\"([^\"]+)\" ]]  && raw_name="${BASH_REMATCH[1]}"  || raw_name=""
+        [[ "$line" =~ SIZE=\"([^\"]+)\" ]]  && raw_size="${BASH_REMATCH[1]}"  || raw_size=""
+        [[ "$line" =~ TRAN=\"([^\"]+)\" ]]  && raw_tran="${BASH_REMATCH[1]}"  || raw_tran=""
+
+        if [[ "$raw_tran" == "usb" ]] && \
+           { [[ "$raw_name" =~ ^sd[a-z]$ ]] || [[ "$raw_name" =~ ^nvme[0-9]+n[0-9]+$ ]]; }; then
+            USB_DEVICES+=("/dev/$raw_name")
+            USB_SIZES+=("$raw_size")
             USB_LABELS+=("")
         fi
     done < <(lsblk -d -P -o NAME,SIZE,TRAN 2>/dev/null)
+}
+
+# Reads and sanitizes the human-readable model name from /sys/block/<dev>/device/model
+sanitize_model_name() {
+    local raw="$1"
+    printf '%s' "$raw" | sed 's/[^a-zA-Z0-9 _.()+-]//g'
 }
 
 get_usb_model() {
@@ -120,24 +130,26 @@ get_usb_model() {
 
     local model_file="${ALLOWED_SYS_PREFIX}${base}/device/model"
     if [[ -f "$model_file" ]]; then
-        local raw
-        raw=$(< "$model_file")
-        printf '%s' "${raw}" | sed 's/[^a-zA-Z0-9 _.()+-]//g'
+        sanitize_model_name "$(< "$model_file")"
         echo
     else
         echo "Dispositivo USB"
     fi
 }
 
+# ── SESSION STATE ─────────────────────────────────────────────────────────────
+
+# Globals used to pass selections between menu functions
 SELECTED_DEV=""
+BOOT_MODE=""
+
+# ── MENUS ─────────────────────────────────────────────────────────────────────
 
 menu_select_device() {
     while true; do
         clear_screen
         draw_header
-
         detect_usb_drives
-
         draw_section "Pendrives USB detectados"
 
         if [[ ${#USB_DEVICES[@]} -eq 0 ]]; then
@@ -154,8 +166,7 @@ menu_select_device() {
             local size="${USB_SIZES[$i]}"
             local model
             model=$(get_usb_model "$dev")
-            local num=$(( i + 1 ))
-            echo -e "  ${BOLD}${GREEN}[$num]${RESET}  ${WHITE}${dev}${RESET}  ${CYAN}${model}${RESET}  ${DIM}(${size})${RESET}"
+            echo -e "  ${BOLD}${GREEN}[$(( i + 1 ))]${RESET}  ${WHITE}${dev}${RESET}  ${CYAN}${model}${RESET}  ${DIM}(${size})${RESET}"
         done
 
         echo
@@ -170,7 +181,7 @@ menu_select_device() {
         read -r choice
         tput civis 2>/dev/null || true
 
-        choice=$(echo "$choice" | tr '[:lower:]' '[:upper:]')
+        choice="${choice^^}"
 
         case "$choice" in
             Q) exit 0 ;;
@@ -189,8 +200,6 @@ menu_select_device() {
         esac
     done
 }
-
-BOOT_MODE=""
 
 menu_select_mode() {
     local dev="$1"
@@ -227,7 +236,7 @@ menu_select_mode() {
         read -r choice
         tput civis 2>/dev/null || true
 
-        choice=$(echo "$choice" | tr '[:lower:]' '[:upper:]')
+        choice="${choice^^}"
 
         case "$choice" in
             L) BOOT_MODE="bios"; return 0 ;;
@@ -242,7 +251,10 @@ menu_select_mode() {
     done
 }
 
-launch_qemu() {
+# ── QEMU LAUNCH ───────────────────────────────────────────────────────────────
+
+# Returns 1 if the parameters are invalid, 0 otherwise.
+validate_launch_params() {
     local dev="$1"
     local mode="$2"
 
@@ -261,19 +273,47 @@ launch_qemu() {
     if [[ "$mode" == "uefi" ]]; then
         if [[ ! "$OVMF_PATH" =~ ^/ ]] || [[ ! -f "$OVMF_PATH" ]]; then
             msg_error "Firmware UEFI não encontrado ou path inválido: ${OVMF_PATH}"
-            msg_info  "Instale o pacote 'edk2-ovmf' e tente novamente."
+            msg_info  "Instale o pacote 'edk2-ovmf' e configure OVMF_PATH no topo do script."
             echo
             read -rp "  Pressione Enter para voltar..."
             return 1
         fi
     fi
+}
+
+# Populates the global qemu_args array based on device and boot mode.
+build_qemu_args() {
+    local dev="$1"
+    local mode="$2"
+
+    qemu_args=(
+        -name "bootcheck - ${dev}"
+        -m "${RAM_MB}"
+        -drive "file=${dev},format=raw,readonly=on,if=virtio,cache=none"
+        -boot order=c,menu=on
+        -display sdl
+        -accel kvm
+        -cpu host
+        -machine type=pc
+    )
+
+    if [[ "$mode" == "uefi" ]]; then
+        qemu_args+=( -bios "${OVMF_PATH}" )
+        qemu_args=("${qemu_args[@]/type=pc/type=q35}")
+    fi
+}
+
+launch_qemu() {
+    local dev="$1"
+    local mode="$2"
+
+    validate_launch_params "$dev" "$mode" || return 1
 
     local model
     model=$(get_usb_model "$dev")
 
     clear_screen
     draw_header
-
     draw_section "Iniciando simulação de boot"
 
     echo -e "  ${DIM}Dispositivo :${RESET} ${WHITE}${BOLD}${dev}${RESET}  ${CYAN}${model}${RESET}"
@@ -297,21 +337,8 @@ launch_qemu() {
     echo
     tput cnorm 2>/dev/null || true
 
-    local qemu_args=(
-        -name "bootterm - ${dev}"
-        -m "${RAM_MB}"
-        -drive "file=${dev},format=raw,if=virtio,cache=none"
-        -boot order=c,menu=on
-        -display sdl
-        -accel kvm
-        -cpu host
-        -machine type=pc
-    )
-
-    if [[ "$mode" == "uefi" ]]; then
-        qemu_args+=( -bios "${OVMF_PATH}" )
-        qemu_args=("${qemu_args[@]/type=pc/type=q35}")
-    fi
+    local qemu_args=()
+    build_qemu_args "$dev" "$mode"
 
     local exit_code=0
     if (( use_sudo == 1 )); then
@@ -320,11 +347,10 @@ launch_qemu() {
         "$QEMU_BIN" "${qemu_args[@]}" || exit_code=$?
     fi
 
+    echo
     if [[ $exit_code -eq 0 ]]; then
-        echo
         msg_ok "Simulação encerrada com sucesso."
     else
-        echo
         msg_error "O QEMU encerrou com erro (código: ${exit_code}) ou foi fechado forçadamente."
     fi
 
@@ -334,23 +360,29 @@ launch_qemu() {
     read -r
 }
 
+# ── STARTUP ───────────────────────────────────────────────────────────────────
+
 check_deps() {
     local missing=()
 
     command -v "$QEMU_BIN" &>/dev/null || missing+=("$QEMU_BIN")
     command -v lsblk       &>/dev/null || missing+=("lsblk (util-linux)")
 
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        echo
-        msg_error "Dependências faltando:"
-        for dep in "${missing[@]}"; do
-            echo -e "    ${RED}✘${RESET}  $dep"
-        done
-        echo
-        msg_info "Instale com: sudo pacman -S qemu-full edk2-ovmf util-linux"
-        echo
-        exit 1
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return 0
     fi
+
+    echo
+    msg_error "Dependências faltando:"
+    for dep in "${missing[@]}"; do
+        echo -e "    ${RED}✘${RESET}  $dep"
+    done
+    echo
+    msg_info "Arch Linux  : sudo pacman -S qemu-full edk2-ovmf util-linux"
+    msg_info "Debian/Ubuntu: sudo apt install qemu-system-x86 ovmf"
+    msg_info "Fedora      : sudo dnf install qemu-system-x86 edk2-ovmf"
+    echo
+    exit 1
 }
 
 main() {

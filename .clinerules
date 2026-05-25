@@ -1,0 +1,51 @@
+# Regras do Cline — BootTerminal
+
+## Contexto do Projeto
+Ferramenta TUI Bash para testar pendrives bootáveis diretamente do terminal usando QEMU — sem VirtualBox, sem GUI, sem reiniciar.
+- **Linguagem:** Bash (script único: `bios`)
+- **Dependências:** QEMU (`qemu-system-x86_64`), `lsblk`, OVMF (para UEFI)
+- **Plataforma:** Linux (Arch, Debian/Ubuntu, Fedora)
+- **Aceleração:** KVM (hardware virtualization)
+- **Repositório:** https://github.com/NunesFilipe/BootTerminal
+
+## Estrutura
+```
+bios        # Script principal executável (TUI + lançador QEMU)
+README.md   # Documentação completa
+LICENSE     # MIT
+```
+
+## Regras de Desenvolvimento
+
+### Bash / Script
+- Use `#!/usr/bin/env bash` no shebang
+- Sempre valide dependências no início: `command -v qemu-system-x86_64`, `command -v lsblk`
+- Variáveis sempre entre aspas para evitar word splitting e globbing
+- Use `set -e` para abortar em erros inesperados
+- Mantenha o script em arquivo único `bios` — é a proposta do projeto (zero config, single file)
+- Cores e formatação TUI via escape ANSI — documente os códigos usados
+
+### QEMU / Boot
+- Modo Legacy BIOS: `-machine type=pc` com KVM
+- Modo UEFI: `-machine type=q35` com `-bios $OVMF_PATH`
+- `OVMF_PATH` deve ser configurável no topo do script — nunca hardcoded no meio do código
+- Acesso ao disco em modo raw read-only (`-drive file=/dev/sdX,format=raw,readonly=on`) — nunca write
+- Verifique permissões antes de acessar `/dev/sdX` — use `sudo` automaticamente se necessário
+
+### Detecção de USB
+- Use `lsblk -d -P -o NAME,SIZE,TRAN` para listar dispositivos
+- Filtre apenas dispositivos com `TRAN="usb"` — não liste SSDs/HDDs internos
+- Leia nome amigável de `/sys/block/<device>/device/model`
+- Ofereça opção de rescan sem reiniciar o script
+
+### Compatibilidade
+- Teste em Arch Linux (distro principal), mas mantenha compatibilidade com Debian/Ubuntu e Fedora
+- Paths do OVMF variam por distro — documente no README todas as variações conhecidas
+- Não assuma que KVM está disponível — verifique e informe o usuário se ausente
+
+## Não Fazer
+- Não acesse discos em modo escrita (`-drive` sem `readonly=on`)
+- Não hardcode paths de firmware OVMF sem configuração no topo do script
+- Não quebre a proposta single-file — este projeto inteiro cabe em um script
+- Não adicione dependências externas além de QEMU e ferramentas padrão Linux
+- Não use Python ou Node.js — o projeto é Bash puro por design
